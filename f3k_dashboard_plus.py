@@ -1,27 +1,23 @@
-# f3k_dashboard_plus.py
-# Streamlit dashboard for F3K glider session analysis (UPGRADED)
-# New features:
-# - ZIP upload (auto-merge many CSVs)
-# - Session metadata (tags, wind) with export/import
-# - Per-session summary (throws, best/avg/median max height, total airtime, avg flight duration)
-# - Per-throw extra metrics: climb rate near launch (max vario in first 2s), climb-to-peak average
-# - Filters: min peak altitude, min/max duration
-# - Histogram of throw max heights
-# - Download combined (throws + metadata) CSV
-# - Optional PNG export of current chart (requires kaleido)
+# f3k_dashboard_combo_predict.py
+# Combo app with layouts ("Classic" vs "Wide + X-Zoom") and predictive helpers:
+# - Throw Strength Prediction (next-throw peak height, per session)
+# - Session Fatigue Modeling (trend of peak height vs time/throw index)
+# - Best Possible Throw Estimate (upper bound based on history + residuals)
+# - Optimal Launch Timing in Tasks (highlight time windows with top conditions)
+#
+# Works with multiple CSVs or a ZIP of CSVs.
+# No extra ML libs required (uses numpy/pandas for simple regressions).
 
 import io
 import json
 import zipfile
-from typing import List, Dict, Any
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="F3K Session Analyzer — Plus", layout="wide")
+st.set_page_config(page_title="F3K Session Analyzer — Predict", layout="wide")
 
 # ---------------------------- Utilities ---------------------------- #
 
@@ -86,7 +82,7 @@ def detect_throws(alt, sa, t, ground_alt=2.0, min_gap_s=5.0, min_flight_s=4.0):
     dt_med = np.median(dt[dt > 0]) if len(dt) else 0.02
     if not np.isfinite(dt_med) or dt_med <= 0:
         dt_med = 0.02
-    vs = np.gradient(alt_s, dt_med)  # m/s approximate
+    vs = np.gradient(alt_s, dt_med)  # m/s approx
 
     ground_mask = alt_s <= (ground_alt + 1.0)
     if ground_mask.any():
@@ -104,13 +100,11 @@ def detect_throws(alt, sa, t, ground_alt=2.0, min_gap_s=5.0, min_flight_s=4.0):
     while i < n:
         if (sa[i] > sa_thr or vs[i] > vs_thr) and alt_s[i] <= (ground_alt + 1.0):
             start_idx = i
-            # Peak search up to 8s
             search_end = min(n-1, start_idx + int(8.0/dt_med))
             peak_idx = start_idx
             for j in range(start_idx, search_end):
                 if alt_s[j] >= alt_s[peak_idx]:
                     peak_idx = j
-            # End: return to ground up to 90s
             end_search_end = min(n-1, peak_idx + int(90.0/dt_med))
             end_idx = None
             for j in range(peak_idx, end_search_end):
@@ -121,23 +115,16 @@ def detect_throws(alt, sa, t, ground_alt=2.0, min_gap_s=5.0, min_flight_s=4.0):
                         break
             if end_idx is None:
                 end_idx = end_search_end
-
             if t[end_idx] - t[start_idx] >= min_flight_s:
-                # Extra metrics
-                t_start = t[start_idx]
-                t_peak  = t[peak_idx]
-                # Max climb in first 2s after start
+                # extra metrics for prediction
+                t_start = t[start_idx]; t_peak = t[peak_idx]
                 win_end = min(n-1, start_idx + int(2.0/dt_med))
                 max_climb_2s = float(np.nanmax(vs[start_idx:win_end+1])) if win_end > start_idx else float("nan")
-                # Average climb to peak
                 duration_to_peak = max(t_peak - t_start, 1e-6)
-                avg_climb_to_peak = float( (alt_s[peak_idx] - alt_s[start_idx]) / duration_to_peak )
+                avg_climb_to_peak = float((alt_s[peak_idx] - alt_s[start_idx]) / duration_to_peak)
                 throws.append({
-                    "start_idx": start_idx,
-                    "peak_idx": peak_idx,
-                    "end_idx": end_idx,
-                    "max_climb_2s": max_climb_2s,
-                    "avg_climb_to_peak": avg_climb_to_peak
+                    "start_idx": start_idx, "peak_idx": peak_idx, "end_idx": end_idx,
+                    "max_climb_2s": max_climb_2s, "avg_climb_to_peak": avg_climb_to_peak
                 })
                 i = end_idx + int(min_gap_s/dt_med)
             else:
@@ -158,14 +145,10 @@ def read_csv_bytes(name: str, content: bytes):
     sa  = df[sa_col].values
     return {"name": name, "df": df, "t": t, "alt": alt, "sa": sa}
 
-# ---------------------------- Sidebar: Uploads ---------------------------- #
+# ---------------------------- Sidebar ---------------------------- #
 
 st.sidebar.header("Upload sessions")
-uploads = st.sidebar.file_uploader(
-    "Drop multiple CSVs *or* a ZIP with many CSVs",
-    type=["csv", "zip"],
-    accept_multiple_files=True
-)
+uploads = st.sidebar.file_uploader("Drop multiple CSVs or a ZIP", type=["csv","zip"], accept_multiple_files=True)
 
 st.sidebar.header("Detection settings")
 sync_to_first_launch = st.sidebar.checkbox("Synchronize sessions to first launch", True)
@@ -174,25 +157,18 @@ min_gap_s = st.sidebar.number_input("Min gap between throws (s)", min_value=0.0,
 min_flight_s = st.sidebar.number_input("Minimum flight duration (s)", min_value=1.0, max_value=30.0, value=4.0, step=0.5)
 show_peak_labels = st.sidebar.checkbox("Show peak labels on chart", True)
 
-st.sidebar.header("Throw filters")
-min_peak_alt = st.sidebar.number_input("Min peak altitude (m)", min_value=0.0, value=0.0, step=1.0)
-min_duration = st.sidebar.number_input("Min duration (s)", min_value=0.0, value=0.0, step=0.5)
-max_duration = st.sidebar.number_input("Max duration (s, 0=ignore)", min_value=0.0, value=0.0, step=0.5)
+st.sidebar.header("Layout")
+layout_mode = st.sidebar.selectbox("Choose layout", ["Classic", "Wide + X-Zoom (Hero Plot)"], index=1)
 
-st.sidebar.header("Chart export")
-enable_png_export = st.sidebar.checkbox("Enable PNG export (requires kaleido)", False)
-
-# ---------------------------- Main ---------------------------- #
-
-st.title("F3K Session Analyzer — Plus")
+# ---------------------------- Load sessions ---------------------------- #
 
 if not uploads:
+    st.title("F3K Session Analyzer — Predict")
     st.info("Upload CSV files or a ZIP in the sidebar to begin.")
     st.stop()
 
 sessions_raw = []
 errors = []
-
 for f in uploads:
     name = getattr(f, "name", "file")
     data = f.read()
@@ -205,140 +181,147 @@ for f in uploads:
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 for zname in zf.namelist():
-                    if not zname.lower().endswith(".csv"):
-                        continue
-                    content = zf.read(zname)
-                    try:
-                        sessions_raw.append(read_csv_bytes(zname, content))
-                    except Exception as e:
-                        errors.append(str(e))
+                    if zname.lower().endswith(".csv"):
+                        try:
+                            sessions_raw.append(read_csv_bytes(zname, zf.read(zname)))
+                        except Exception as e:
+                            errors.append(str(e))
         except Exception as e:
             errors.append(f"{name}: {e}")
-    else:
-        errors.append(f"{name}: unsupported file type")
-
 if errors:
     st.warning("Some files could not be parsed:\n\n" + "\n".join(errors))
 
-if not sessions_raw:
-    st.stop()
-
-# Determine t0 across sessions
+# Determine global start
 starts = []
 for s in sessions_raw:
-    start_idx, dt_med, vs = detect_first_start(s["alt"], s["sa"], s["t"])
-    s["first_start_idx"] = start_idx
-    s["dt_med"] = dt_med
-    s["vs"] = vs
-    starts.append(s["t"][start_idx])
+    idx, dt, vs = detect_first_start(s["alt"], s["sa"], s["t"])
+    s["first_start_idx"] = idx
+    s["dt_med"] = dt
+    starts.append(s["t"][idx])
 t0_global = min(starts) if sync_to_first_launch else 0.0
 
-# Session metadata store
-if "meta" not in st.session_state:
-    st.session_state.meta = {}  # name -> dict
-
-# Build processed sessions and stats
+# Process sessions & assemble throw-level dataset
 processed = []
 rows = []
-
 for s in sessions_raw:
     name = s["name"]
     t_al = s["t"] - (s["t"][s["first_start_idx"]] if sync_to_first_launch else t0_global)
     alt = pd.Series(pd.to_numeric(s["alt"], errors="coerce")).interpolate(limit_direction="both").values
     sa  = pd.Series(pd.to_numeric(s["sa"],  errors="coerce")).interpolate(limit_direction="both").values
-    throws, vs_series = detect_throws(alt, sa, t_al, ground_alt, min_gap_s, min_flight_s)
+    throws, vs = detect_throws(alt, sa, t_al, ground_alt, min_gap_s, min_flight_s)
 
-    # Ensure metadata exists
-    meta = st.session_state.meta.get(name, {"tags": "", "wind_speed": "", "wind_dir": "", "notes": ""})
-    st.session_state.meta[name] = meta
-
+    # build per-throw rows
     for k, th in enumerate(throws, start=1):
         t_start = float(t_al[th["start_idx"]])
         t_peak  = float(t_al[th["peak_idx"]])
         t_end   = float(t_al[th["end_idx"]])
         max_alt = float(alt[th["peak_idx"]])
-        dur = t_end - t_start
         rows.append({
             "session": name,
             "throw": k,
             "t_start_s": round(t_start, 2),
             "t_peak_s": round(t_peak, 2),
             "t_end_s": round(t_end, 2),
-            "duration_s": round(dur, 2),
+            "elapsed_s": round(t_start, 2),
+            "duration_s": round(t_end - t_start, 2),
             "max_alt_m": round(max_alt, 2),
             "max_climb_2s_mps": round(th["max_climb_2s"], 2),
             "avg_climb_to_peak_mps": round(th["avg_climb_to_peak"], 2),
-            "tags": meta.get("tags", ""),
-            "wind_speed": meta.get("wind_speed", ""),
-            "wind_dir": meta.get("wind_dir", ""),
-            "notes": meta.get("notes", ""),
         })
 
     processed.append({"name": name, "t": t_al, "alt": alt, "throws": throws})
 
-stats_df = pd.DataFrame(rows)
+stats_df = pd.DataFrame(rows).sort_values(["session","throw"]).reset_index(drop=True)
 
-# Apply throw filters
-if not stats_df.empty:
-    filt = (stats_df["max_alt_m"] >= min_peak_alt) & (stats_df["duration_s"] >= min_duration)
-    if max_duration > 0:
-        filt &= stats_df["duration_s"] <= max_duration
-    stats_df = stats_df[filt].reset_index(drop=True)
+# ---------------------------- Predictive helpers ---------------------------- #
 
-# Per-session summary
-summary = []
-for name in sorted({p["name"] for p in processed}):
-    sdf = stats_df[stats_df["session"] == name]
-    if sdf.empty:
-        summary.append({"session": name, "throws": 0, "best_max_m": None, "avg_max_m": None, "median_max_m": None, "total_airtime_s": 0, "avg_duration_s": None})
-        continue
-    summary.append({
-        "session": name,
-        "throws": int(sdf["throw"].count()),
-        "best_max_m": float(sdf["max_alt_m"].max()),
-        "avg_max_m": float(sdf["max_alt_m"].mean()),
-        "median_max_m": float(sdf["max_alt_m"].median()),
-        "total_airtime_s": float(sdf["duration_s"].sum()),
-        "avg_duration_s": float(sdf["duration_s"].mean()),
-    })
-summary_df = pd.DataFrame(summary)
+def ridge_fit_predict(X, y, X_next, alpha=1.0):
+    # Add bias term
+    Xb = np.c_[np.ones(len(X)), X]
+    XtX = Xb.T @ Xb + alpha * np.eye(Xb.shape[1])
+    beta = np.linalg.pinv(XtX) @ (Xb.T @ y)
+    Xn = np.r_[1.0, X_next]
+    yhat = float(Xn @ beta)
+    # residual std
+    y_pred_all = Xb @ beta
+    resid = y - y_pred_all
+    sigma = float(np.sqrt(max(np.mean(resid**2), 1e-6)))
+    return yhat, sigma, beta
 
-# ---------------------------- Layout ---------------------------- #
-top, = st.columns([1])
-with top:
-    st.subheader("Session metadata")
-    # Editable metadata per session
-    for name in sorted({p["name"] for p in processed}):
-        with st.expander(name, expanded=False):
-            m = st.session_state.meta[name]
-            col1, col2, col3 = st.columns(3)
-            m["tags"] = col1.text_input("Tags (comma-separated)", value=m.get("tags",""), key=f"tags_{name}")
-            m["wind_speed"] = col2.text_input("Wind speed (m/s or km/h)", value=m.get("wind_speed",""), key=f"ws_{name}")
-            m["wind_dir"] = col3.text_input("Wind direction (deg/cardinal)", value=m.get("wind_dir",""), key=f"wd_{name}")
-            m["notes"] = st.text_area("Notes", value=m.get("notes",""), key=f"notes_{name}")
-            st.session_state.meta[name] = m
-    colA, colB = st.columns(2)
-    with colA:
-        st.download_button("Export metadata (JSON)",
-                           data=json.dumps(st.session_state.meta, indent=2).encode("utf-8"),
-                           file_name="f3k_metadata.json",
-                           mime="application/json")
-    with colB:
-        meta_json = st.file_uploader("Import metadata JSON", type=["json"], accept_multiple_files=False, key="meta_import")
-        if meta_json is not None:
-            try:
-                st.session_state.meta.update(json.loads(meta_json.read().decode("utf-8")))
-                st.success("Metadata imported.")
-            except Exception as e:
-                st.error(f"Import failed: {e}")
+def make_predictions(df):
+    # For each session, predict next throw height from features
+    cards = []
+    vrects = {}  # session -> list of (start,end) "good windows"
+    if df.empty:
+        return cards, vrects
+    for session, sdf in df.groupby("session"):
+        sdf = sdf.sort_values("throw").reset_index(drop=True)
+        if len(sdf) < 3:
+            continue
+        # features for each throw
+        X = sdf[["max_climb_2s_mps", "avg_climb_to_peak_mps", "duration_s"]].values
+        # add previous height as a feature (lag 1)
+        prev_height = np.r_[np.nan, sdf["max_alt_m"].values[:-1]]
+        sdf["prev_height"] = prev_height
+        X = np.c_[X, sdf["prev_height"].fillna(method="bfill").values]
+        y = sdf["max_alt_m"].values
 
-left, right = st.columns([3,2])
+        # Train on throws except last, predict for "next" using last row features
+        X_train = X[:-1]; y_train = y[:-1]
+        X_next = X[-1]  # next-throw features approximated from last known
+        yhat, sigma, beta = ridge_fit_predict(X_train, y_train, X_next, alpha=1.0)
 
-with left:
-    st.subheader("Interactive altitude plot")
-    session_names = [p["name"] for p in processed]
-    selected_sessions = st.multiselect("Select sessions", options=session_names, default=session_names, key="sess_select")
+        # Fatigue modeling: linear trend vs throw index and vs elapsed time
+        idx = np.arange(len(sdf))
+        # simple linear fit y = a + b*x
+        A = np.c_[np.ones_like(idx), idx]
+        b_idx = np.linalg.lstsq(A, y, rcond=None)[0]
+        slope_per_throw = float(b_idx[1])  # meters per throw
 
+        # vs elapsed time
+        t = sdf["elapsed_s"].values
+        At = np.c_[np.ones_like(t), t]
+        b_t = np.linalg.lstsq(At, y, rcond=None)[0]
+        slope_per_min = float(b_t[1] * 60.0)  # meters per minute
+
+        # Best possible throw: upper bound = min(personal_best * 1.02, mean + 2*sigma global)
+        personal_best = float(np.max(y))
+        upper_bound = float(min(personal_best * 1.02, np.mean(y) + 2.0*sigma))
+
+        # Optimal timing windows: find rolling windows where height & duration are in top quantile
+        roll = sdf.rolling(window=3, min_periods=2).mean(numeric_only=True)
+        good = (roll["max_alt_m"] >= np.nanpercentile(sdf["max_alt_m"], 75)) & \
+               (roll["duration_s"] >= np.nanpercentile(sdf["duration_s"], 75))
+        good = good.fillna(False).values
+        windows = []
+        start = None
+        for i, ok in enumerate(good):
+            if ok and start is None:
+                start = i
+            elif not ok and start is not None:
+                windows.append((sdf.loc[start,"t_start_s"], sdf.loc[i-1,"t_end_s"]))
+                start = None
+        if start is not None:
+            windows.append((sdf.loc[start,"t_start_s"], sdf.loc[len(sdf)-1,"t_end_s"]))
+        vrects[session] = windows
+
+        cards.append({
+            "session": session,
+            "pred_next_m": round(yhat, 1),
+            "uncertainty_m": round(sigma, 1),
+            "fatigue_slope_per_throw": round(slope_per_throw, 2),
+            "fatigue_slope_per_min": round(slope_per_min, 2),
+            "best_possible_m": round(upper_bound, 1),
+            "personal_best_m": round(personal_best, 1),
+            "good_windows": windows
+        })
+    return cards, vrects
+
+pred_cards, good_windows = make_predictions(stats_df)
+
+# ---------------------------- Layouts ---------------------------- #
+
+def build_plot(selected_sessions, lock_y=False, add_rangeslider=False, vrects=None):
     fig = go.Figure()
     for p in processed:
         if p["name"] not in selected_sessions:
@@ -350,47 +333,123 @@ with left:
             peak_text = [f'#{i+1} {int(round(y))}m' for i, y in enumerate(peak_y)]
             fig.add_trace(go.Scatter(x=peak_x, y=peak_y, mode="markers+text", text=peak_text,
                                      textposition="top center", name=f"{p['name']} peaks", showlegend=False))
-    fig.update_layout(
+        # Add optimal timing vrects
+        if vrects and p["name"] in vrects:
+            for (xs, xe) in vrects[p["name"]]:
+                fig.add_vrect(x0=xs, x1=xe, fillcolor="LightGreen", opacity=0.25, line_width=0)
+
+    layout_kwargs = dict(
         xaxis_title="Time since first launch start (s)" if sync_to_first_launch else "Time (s)",
         yaxis_title="Altitude (m)",
         hovermode="x unified",
         legend_title="Sessions",
-        margin=dict(l=20, r=20, t=40, b=20),
-        height=520
+        margin=dict(l=10, r=10, t=10, b=0),
+        height=600
     )
-    st.plotly_chart(fig, use_container_width=True)
+    if lock_y:
+        layout_kwargs["yaxis"] = dict(fixedrange=True)
+    if add_rangeslider:
+        layout_kwargs["xaxis"] = dict(rangeslider=dict(visible=True))
+    fig.update_layout(**layout_kwargs)
+    return fig
 
-    if enable_png_export:
-        try:
-            import kaleido  # noqa: F401
-            png = fig.to_image(format="png", scale=2)
-            st.download_button("Download current chart as PNG", data=png, file_name="f3k_chart.png", mime="image/png")
-        except Exception as e:
-            st.info("PNG export requires the 'kaleido' package. Install it with: pip install -U kaleido")
+st.title("F3K Session Analyzer — Predict")
 
-with right:
-    st.subheader("Per-session summary")
-    st.dataframe(summary_df, use_container_width=True, height=240)
-    st.subheader("Best throws")
-    if not stats_df.empty:
-        best = stats_df.loc[stats_df.groupby("session")["max_alt_m"].idxmax()].sort_values("max_alt_m", ascending=False)
-        st.dataframe(best, use_container_width=True, height=240)
-    else:
-        st.info("No throws detected with current thresholds/filters.")
+if st.sidebar.selectbox("Prediction panels", ["Show"], index=0) == "Show":
+    if pred_cards:
+        st.markdown("### Predictive insights")
+        cols = st.columns(min(3, len(pred_cards)))
+        for i, card in enumerate(pred_cards):
+            with cols[i % len(cols)]:
+                st.markdown(f"**{card['session']}**")
+                st.write(f"Next throw: **{card['pred_next_m']} m** ± {card['uncertainty_m']}")
+                slope = card['fatigue_slope_per_throw']
+                trend = "⬇️" if slope < -0.2 else ("⬆️" if slope > 0.2 else "➡️")
+                st.write(f"Fatigue trend per throw: **{slope} m** {trend}")
+                st.write(f"Best possible (now): **{card['best_possible_m']} m** (PB {card['personal_best_m']} m)")
+                if card["good_windows"]:
+                    st.write("Optimal timing windows (s):")
+                    st.write(", ".join([f"{int(a)}–{int(b)}" for a,b in card["good_windows"]]))
+                else:
+                    st.write("No standout timing windows detected.")
 
-st.subheader("All throws (filters applied)")
-st.dataframe(stats_df, use_container_width=True, height=360)
+# ----- Layout toggle -----
+layout_mode = st.sidebar.selectbox("Layout", ["Classic", "Wide + X-Zoom (Hero Plot)"], index=1, key="layout_mode")
 
-st.subheader("Distribution of peak heights")
-if not stats_df.empty:
-    hist = px.histogram(stats_df, x="max_alt_m", nbins=20, title="Histogram of Throw Peak Altitudes (m)")
-    hist.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=360)
-    st.plotly_chart(hist, use_container_width=True)
+if layout_mode == "Wide + X-Zoom (Hero Plot)":
+    # Hero plot at the top (full width, tall) as per your red rectangle
+    st.subheader("Interactive altitude plot")
+    session_names = [p["name"] for p in processed]
+    selected_sessions = st.multiselect("Select sessions", options=session_names, default=session_names, key="sess_select_wide")
+    hero_fig = build_plot(selected_sessions, lock_y=True, add_rangeslider=True, vrects=good_windows)
+    st.plotly_chart(
+        hero_fig, use_container_width=True,
+        config={"scrollZoom": True, "displaylogo": False, "doubleClick": "reset",
+                "modeBarButtonsToAdd": ["zoom2d","pan2d","autoScale2d","resetScale2d"]}
+    )
+
+    # Under the hero plot, show summaries side-by-side
+    left, right = st.columns([3,2], gap="large")
+    with left:
+        st.subheader("All throws")
+        st.dataframe(stats_df, use_container_width=True, height=360)
+    with right:
+        st.subheader("Per-session summary")
+        if stats_df.empty:
+            st.info("No throws detected yet.")
+        else:
+            summary = (
+                stats_df.groupby("session")
+                .agg(throws=("throw","count"),
+                     best_max_m=("max_alt_m","max"),
+                     avg_max_m=("max_alt_m","mean"),
+                     median_max_m=("max_alt_m","median"),
+                     total_airtime_s=("duration_s","sum"))
+                .reset_index()
+                .sort_values("session")
+            )
+            st.dataframe(summary, use_container_width=True, height=360)
+
 else:
-    st.info("Nothing to plot.")
+    # Classic layout with more analysis panels
+    st.subheader("Interactive altitude plot")
+    session_names = [p["name"] for p in processed]
+    selected_sessions = st.multiselect("Select sessions", options=session_names, default=session_names, key="sess_select_classic")
+    fig = build_plot(selected_sessions, lock_y=False, add_rangeslider=False, vrects=good_windows)
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "doubleClick": "reset"})
 
-# Download combined CSV
-csv_all = stats_df.to_csv(index=False).encode("utf-8")
-st.download_button("Download combined throws + metadata (CSV)", data=csv_all, file_name="f3k_throws_with_meta.csv", mime="text/csv")
+    left, right = st.columns([3,2])
+    with left:
+        st.subheader("Per-session summary")
+        if stats_df.empty:
+            st.info("No throws detected.")
+        else:
+            summary = (
+                stats_df.groupby("session")
+                .agg(throws=("throw","count"),
+                     best_max_m=("max_alt_m","max"),
+                     avg_max_m=("max_alt_m","mean"),
+                     median_max_m=("max_alt_m","median"),
+                     total_airtime_s=("duration_s","sum"),
+                     avg_duration_s=("duration_s","mean"))
+                .reset_index()
+                .sort_values("session")
+            )
+            st.dataframe(summary, use_container_width=True, height=360)
 
-st.caption("Tip: Use ZIP upload to quickly add a batch of session CSVs. Adjust detection thresholds in the sidebar if launches are missed or false positives appear.")
+    with right:
+        st.subheader("Best throws")
+        if not stats_df.empty:
+            best = stats_df.loc[stats_df.groupby("session")["max_alt_m"].idxmax()].sort_values("max_alt_m", ascending=False)
+            st.dataframe(best, use_container_width=True, height=360)
+
+    st.subheader("All throws")
+    st.dataframe(stats_df.sort_values(["session","throw"]), use_container_width=True, height=360)
+
+    st.subheader("Distribution of peak heights")
+    if not stats_df.empty:
+        hist = px.histogram(stats_df, x="max_alt_m", nbins=20, title="Histogram of Throw Peak Altitudes (m)")
+        hist.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=360)
+        st.plotly_chart(hist, use_container_width=True)
+    else:
+        st.info("Nothing to plot yet.")
