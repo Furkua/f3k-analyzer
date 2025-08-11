@@ -1,5 +1,4 @@
 # f3k-analyzer
-A comprehensive analyzer for simultaneous logs for f3k launch and flght analysis
 F3K Session Analyzer is for digging into discus launch glider (DLG) flight logs.
 Drop in a bunch of your CSVs (or even a whole ZIP of them) and it’ll:
 	•	Line up all your sessions so the first launch starts at the same time
