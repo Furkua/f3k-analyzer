@@ -10,3 +10,4 @@ Drop in a bunch of your CSVs (or even a whole ZIP of them) and it’ll:
 	•	Let you download all the throw data with your own notes and tags
 
 It’s basically a flight diary and scoreboard rolled into one, perfect for comparing training days, trying different setups, or just geeking out over numbers.
+try it here: http://furkua.streamlit.app
