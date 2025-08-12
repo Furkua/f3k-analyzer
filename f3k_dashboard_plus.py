@@ -28,8 +28,6 @@ with col2:
         unsafe_allow_html=True
     )
 
-st.set_page_config(page_title="F3K Session Analyzer — Predict", layout="wide")
-
 # ---------------------------- Utilities ---------------------------- #
 
 ALT_KEYS = ["Alt(m)", "Alt", "Altitude", "BaroAlt", "Height", "Alti"]
