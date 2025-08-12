@@ -171,7 +171,6 @@ layout_mode = st.sidebar.selectbox("Choose layout", ["Classic", "Wide + X-Zoom (
 # ---------------------------- Load sessions ---------------------------- #
 
 if not uploads:
-    st.title("F3K Session Analyzer — Predict")
     st.info("Upload CSV files or a ZIP in the sidebar to begin.")
     st.stop()
 
