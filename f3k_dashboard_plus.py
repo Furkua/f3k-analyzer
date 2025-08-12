@@ -17,6 +17,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+logo_url = "https://raw.githubusercontent.com/Furkua/f3k-analyzer/main/logo.png"
+
+with st.sidebar:
+    st.image(logo_url, use_container_width=True)
+
 st.set_page_config(page_title="F3K Session Analyzer — Predict", layout="wide")
 
 # ---------------------------- Utilities ---------------------------- #
