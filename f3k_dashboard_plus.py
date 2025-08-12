@@ -17,6 +17,17 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+# Display logo and title
+logo_url = "https://raw.githubusercontent.com/Furkua/f3k-analyzer/main/logo.png"
+col1, col2 = st.columns([1, 4])
+with col1:
+    st.image(logo_url, use_column_width=True)
+with col2:
+    st.markdown(
+        "<h1 style='margin-bottom:0;'>F3K Multi Session Analyzer</h1>",
+        unsafe_allow_html=True
+    )
+
 st.set_page_config(page_title="F3K Session Analyzer — Predict", layout="wide")
 
 # ---------------------------- Utilities ---------------------------- #
